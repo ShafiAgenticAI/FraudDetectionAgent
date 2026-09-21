@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+streamlit
+python-multipart
+python-dotenv
+requests
+pymupdf
+chromadb
+openai
+google-generativeai
+tiktoken
+pydantic
+pytest
+httpx
