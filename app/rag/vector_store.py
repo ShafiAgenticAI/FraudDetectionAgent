@@ -25,6 +25,19 @@ def add_chunks(
     )
 
 
+def delete_document(filename: str) -> int:
+    """Remove every chunk belonging to one document (used before
+    re-ingesting a changed file, and when a document is deleted outright,
+    so stale/orphaned chunks can never be retrieved)."""
+    existing = collection.get(where={"document": filename}, include=[])
+    removed = len(existing.get("ids", []))
+
+    if removed:
+        collection.delete(where={"document": filename})
+
+    return removed
+
+
 def search(
     query_embedding: list[float],
     top_k: int = 5,

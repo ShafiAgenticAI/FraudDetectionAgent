@@ -34,5 +34,15 @@ CHUNK_SIZE_TOKENS = int(os.getenv("CHUNK_SIZE_TOKENS", "500"))
 CHUNK_OVERLAP_TOKENS = int(os.getenv("CHUNK_OVERLAP_TOKENS", "100"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "50"))
 
+# How the bot describes its own scope in the router / out-of-scope refusal
+# / greeting reply.
+DOMAIN_LABEL = os.getenv(
+    "DOMAIN_LABEL", "the regulatory compliance documents indexed in this system"
+)
+
+# How many recent exchanges (one user message + one assistant reply = one
+# exchange) each chat session keeps server-side.
+MAX_SESSION_TURNS = int(os.getenv("MAX_SESSION_TURNS", "10"))
+
 DOCUMENT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 CHROMA_PERSIST_DIRECTORY.mkdir(parents=True, exist_ok=True)

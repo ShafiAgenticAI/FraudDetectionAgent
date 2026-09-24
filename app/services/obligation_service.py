@@ -28,10 +28,13 @@ Return valid JSON in exactly this general structure:
 }
 
 Rules:
-- Do not infer obligations that are not stated.
+- Do not infer obligations that are not explicitly stated in the text.
+- Never fabricate a deadline, figure, or requirement to fill a field.
 - Use null when a field is not available.
 - Preserve the source page and chunk supplied in the context.
-- Return an empty obligations list if there are no explicit obligations.
+- Return an empty obligations list if there are no explicit obligations
+  in the supplied text -- an empty list is the correct, expected output
+  for text with no obligations, not a failure.
 """
 
 

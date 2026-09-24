@@ -36,8 +36,17 @@ def chunk_page_text(text: str) -> list[str]:
     return chunks
 
 
-def build_chunks(pages: list[dict], filename: str) -> list[dict]:
-    """Turn page records into Chroma-ready chunks with citation metadata."""
+def build_chunks(
+    pages: list[dict],
+    filename: str,
+    ingested_at: str | None = None,
+) -> list[dict]:
+    """Turn page records into Chroma-ready chunks with citation metadata.
+
+    ingested_at (ISO-8601 UTC timestamp) is stamped onto every chunk's
+    metadata so newer re-indexed content can later be preferred/ranked
+    over stale entries if needed (data-freshness tracking).
+    """
     results: list[dict] = []
 
     for page in pages:
@@ -48,17 +57,22 @@ def build_chunks(pages: list[dict], filename: str) -> list[dict]:
         ):
             chunk_id = f"{filename}::p{page_number}::c{chunk_number}"
 
+            metadata = {
+                "document": filename,
+                "source": filename,
+                "page": page_number,
+                "chunk": chunk_number,
+                "chunk_id": chunk_id,
+            }
+
+            if ingested_at:
+                metadata["ingested_at"] = ingested_at
+
             results.append(
                 {
                     "id": chunk_id,
                     "text": text,
-                    "metadata": {
-                        "document": filename,
-                        "source": filename,
-                        "page": page_number,
-                        "chunk": chunk_number,
-                        "chunk_id": chunk_id,
-                    },
+                    "metadata": metadata,
                 }
             )
 

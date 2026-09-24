@@ -34,7 +34,10 @@ def summarize_document(filename: str) -> dict:
             (
                 "Summarize only the supplied regulatory text. "
                 "Identify important requirements, changes, risks, "
-                "and business implications. Do not invent facts."
+                "and business implications. Do not invent facts, figures, "
+                "or requirements that are not present in the text. If a "
+                "section has nothing substantive to summarize, state that "
+                "plainly instead of filling in plausible-sounding content."
             ),
             text,
         )

@@ -4,7 +4,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.api.schemas.documents import IngestRequest
 from app.config import DOCUMENT_DIRECTORY, MAX_UPLOAD_MB
-from app.services.ingestion_service import ingest_pdf
+from app.services.ingestion_service import ingest_pdf, remove_document
 
 router = APIRouter()
 
@@ -44,10 +44,22 @@ async def upload_document(file: UploadFile = File(...)):
 @router.post("/ingest")
 def ingest_document(request: IngestRequest):
     try:
-        return ingest_pdf(request.filename)
+        return ingest_pdf(request.filename, force=request.force)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/{filename}")
+def delete_document(filename: str):
+    """Remove a document's stored PDF and its indexed chunks so stale or
+    retired content can never be queried, summarized, or cited again."""
+    try:
+        return remove_document(filename)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))

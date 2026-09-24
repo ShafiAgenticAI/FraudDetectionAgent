@@ -1,9 +1,23 @@
-from app.config import TOP_K
+from app.config import DOMAIN_LABEL, TOP_K
 from app.llm.client import chat_completion
 from app.rag.embeddings import embed_query
 from app.rag.vector_store import search
+from app.services import session_store
+from app.services.intent_router import classify_intent
 
-SYSTEM_PROMPT = """
+# Used verbatim so callers (and tests) can reliably detect an abstention
+# instead of parsing free text for something that "sounds like" a refusal.
+FALLBACK_MESSAGE = (
+    "I do not have sufficient information in the provided documentation "
+    "to answer that."
+)
+
+OUT_OF_SCOPE_MESSAGE = (
+    f"I'm designed specifically to answer questions about {DOMAIN_LABEL}. "
+    "I can't help with topics outside that scope."
+)
+
+SYSTEM_PROMPT = f"""
 You are a regulatory compliance document assistant.
 
 Your job is to answer questions using ONLY the supplied retrieved
@@ -11,8 +25,9 @@ regulatory document context.
 
 Rules:
 1. Do not invent regulatory requirements, dates, penalties, or citations.
-2. If the retrieved context is insufficient, say that the indexed
-   documents do not contain enough information.
+2. If the retrieved context does not contain enough information to answer
+   confidently, respond with EXACTLY this sentence and nothing else:
+   "{FALLBACK_MESSAGE}"
 3. Answer clearly and concisely.
 4. Every substantive claim must be supported by the retrieved context.
 5. Do not provide legal advice.
@@ -20,19 +35,140 @@ Rules:
    where the answer came from.
 """
 
+GREETING_PROMPT = f"""
+You are a friendly front door to an assistant whose only job is
+answering questions about {DOMAIN_LABEL}.
 
-def answer_question(question: str, top_k: int = TOP_K) -> dict:
-    results = search(embed_query(question), top_k)
+The user's message is small talk (a greeting, thanks, goodbye, or a
+"who are you / what can you do" question) -- NOT a substantive question.
 
-    if not results:
+Reply briefly and warmly, and mention in one sentence that you can
+answer questions about {DOMAIN_LABEL}. Do not attempt to answer any
+substantive compliance question here, even if one is implied.
+"""
+
+CONDENSE_PROMPT = """
+You rewrite a user's latest chat message into a standalone search query,
+using the prior conversation as context.
+
+Rules:
+- Preserve the user's intent exactly; do not answer the question yourself.
+- Resolve pronouns and vague references ("it", "that policy", "this
+  requirement") using the conversation history.
+- If the latest message is already a standalone question, return it
+  unchanged.
+- Return ONLY the rewritten question as plain text. No preamble, no
+  quotation marks, no explanation.
+"""
+
+# Heuristic faithfulness/groundedness check: what fraction of the
+# meaningful (>4 char) words in the answer also appear in the retrieved
+# context. This is NOT a substitute for a real RAG-triad evaluator (e.g.
+# Ragas/TruLens with an LLM judge) -- it's a cheap, zero-extra-API-call
+# guardrail that catches obviously unsupported answers so the UI can flag
+# them, without adding latency or cost to every request.
+GROUNDEDNESS_OVERLAP_THRESHOLD = 0.25
+
+
+def _condense_question(question: str, history: list[dict] | None) -> str:
+    if not history:
+        return question
+
+    transcript = "\n".join(
+        f"{turn.get('role', 'user')}: {turn.get('content', '')}"
+        for turn in history[-6:]  # last few turns is enough context
+    )
+
+    rewritten = chat_completion(
+        CONDENSE_PROMPT,
+        f"Conversation history:\n{transcript}\n\nLatest message:\n{question}",
+    )
+
+    rewritten = (rewritten or "").strip()
+
+    return rewritten or question
+
+
+def _is_grounded(answer: str, context_parts: list[str]) -> bool:
+    if answer.strip() == FALLBACK_MESSAGE:
+        return True  # correctly abstained -- nothing to check
+
+    answer_words = {w.lower() for w in answer.split() if len(w) > 4}
+
+    if not answer_words:
+        return True
+
+    context_words = {
+        w.lower() for w in " ".join(context_parts).split() if len(w) > 4
+    }
+
+    overlap = len(answer_words & context_words) / len(answer_words)
+
+    return overlap >= GROUNDEDNESS_OVERLAP_THRESHOLD
+
+
+def _remember(session_id: str | None, question: str, answer: str) -> None:
+    if session_id:
+        session_store.remember_turn(session_id, question, answer)
+
+
+def answer_question(
+    question: str,
+    top_k: int = TOP_K,
+    history: list[dict] | None = None,
+    session_id: str | None = None,
+) -> dict:
+    # A session_id lets the server own "recent conversation" instead of
+    # requiring the caller to resend the whole transcript every request.
+    # An explicitly-passed history always wins (stateless API callers).
+    if history is None and session_id:
+        history = session_store.get_history(session_id)
+
+    intent = classify_intent(question, history)
+
+    if intent == "greeting":
+        answer = chat_completion(GREETING_PROMPT, question)
+        _remember(session_id, question, answer)
+
         return {
             "question": question,
-            "answer": (
-                "No indexed regulatory content was found. "
-                "Upload and index a PDF first."
-            ),
+            "search_query": question,
+            "intent": intent,
+            "answer": answer,
             "citations": [],
             "retrieved_chunks": 0,
+            "grounded": True,
+        }
+
+    if intent == "out_of_scope":
+        _remember(session_id, question, OUT_OF_SCOPE_MESSAGE)
+
+        return {
+            "question": question,
+            "search_query": question,
+            "intent": intent,
+            "answer": OUT_OF_SCOPE_MESSAGE,
+            "citations": [],
+            "retrieved_chunks": 0,
+            "grounded": True,
+        }
+
+    # intent == "domain_query" -- standard retrieval + generation path.
+    search_query = _condense_question(question, history)
+
+    results = search(embed_query(search_query), top_k)
+
+    if not results:
+        _remember(session_id, question, FALLBACK_MESSAGE)
+
+        return {
+            "question": question,
+            "search_query": search_query,
+            "intent": intent,
+            "answer": FALLBACK_MESSAGE,
+            "citations": [],
+            "retrieved_chunks": 0,
+            "grounded": True,
         }
 
     context_parts = []
@@ -64,13 +200,18 @@ def answer_question(question: str, top_k: int = TOP_K) -> dict:
         SYSTEM_PROMPT,
         (
             f"Retrieved regulatory context:\n\n{context}\n\n"
-            f"User question:\n{question}"
+            f"User question:\n{search_query}"
         ),
     )
 
+    _remember(session_id, question, answer)
+
     return {
         "question": question,
+        "search_query": search_query,
+        "intent": intent,
         "answer": answer,
         "citations": citations,
         "retrieved_chunks": len(results),
+        "grounded": _is_grounded(answer, context_parts),
     }

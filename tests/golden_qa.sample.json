@@ -1,0 +1,12 @@
+[
+  {
+    "question": "What are the recordkeeping requirements under this regulation?",
+    "expected_pages": [12, 13],
+    "notes": "Replace with a real question + the page(s) a correct answer must cite, agreed with a domain expert."
+  },
+  {
+    "question": "What is the deadline for filing a disclosure after a policy change?",
+    "expected_pages": [4],
+    "notes": "Add 50-100 of these, covering easy lookups, multi-page answers, and questions with no answer in the corpus."
+  }
+]

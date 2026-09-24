@@ -7,7 +7,6 @@ requests
 pymupdf
 chromadb
 openai
-google-generativeai
 tiktoken
 pydantic
 pytest
