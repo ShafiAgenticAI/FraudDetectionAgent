@@ -1,12 +1,24 @@
 from pathlib import Path
+import logging
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from app.api.schemas.documents import IngestRequest
 from app.config import DOCUMENT_DIRECTORY, MAX_UPLOAD_MB
+from app.db import list_documents, record_upload
 from app.services.ingestion_service import ingest_pdf, remove_document
 
+logger = logging.getLogger("compliance_copilot.documents")
+
 router = APIRouter()
+
+
+@router.get("/")
+def list_indexed_documents():
+    """The document registry: every uploaded/indexed file with its
+    status, chunk count, and dates (the doc's "Simple Data Model"
+    Documents table)."""
+    return {"documents": list_documents()}
 
 
 @router.post("/upload")
@@ -33,6 +45,10 @@ async def upload_document(file: UploadFile = File(...)):
     safe_name = Path(file.filename).name
     destination = DOCUMENT_DIRECTORY / safe_name
     destination.write_bytes(content)
+
+    record_upload(safe_name)
+
+    logger.info("UPLOAD complete | file=%s | size_bytes=%d", safe_name, len(content))
 
     return {
         "filename": safe_name,

@@ -178,6 +178,7 @@ with st.sidebar:
         ("chat", "💬  Compliance Chat"),
         ("analysis", "📊  Document Analysis"),
         ("documents", "📄  Documents"),
+        ("analytics", "📈  Analytics"),
     ]
 
     for key, label in nav_items:
@@ -262,18 +263,68 @@ def render_documents_view() -> None:
                     data = response.json()
                     st.session_state["last_filename"] = data["filename"]
                     st.success("PDF uploaded successfully.")
+                    st.rerun()
                 else:
                     st.error(response.text)
 
             except requests.RequestException as exc:
                 st.error(f"Backend connection error: {exc}")
 
-    filename = st.session_state["last_filename"]
+    registry = []
 
-    if filename:
+    with st.container(border=True):
+        st.subheader("Indexed documents")
+
+        try:
+            response = requests.get(f"{API_BASE_URL}/api/documents/", timeout=30)
+
+            if response.ok:
+                registry = response.json().get("documents", [])
+
+                if registry:
+                    st.dataframe(
+                        [
+                            {
+                                "Filename": doc["filename"],
+                                "Status": doc["status"],
+                                "Chunks": doc["chunks_count"],
+                                "Source": doc["source"],
+                                "Uploaded": doc["upload_date"][:19].replace("T", " "),
+                                "Indexed": (
+                                    (doc["indexed_at"] or "")[:19].replace("T", " ")
+                                    if doc.get("indexed_at")
+                                    else "—"
+                                ),
+                            }
+                            for doc in registry
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No documents uploaded yet.")
+            else:
+                st.error(response.text)
+
+        except requests.RequestException as exc:
+            st.error(f"Backend connection error: {exc}")
+
+    filenames = [doc["filename"] for doc in registry]
+
+    if filenames:
+        default_index = (
+            filenames.index(st.session_state["last_filename"])
+            if st.session_state["last_filename"] in filenames
+            else 0
+        )
+
         with st.container(border=True):
             st.subheader("Manage document")
-            st.info(f"Selected document: **{filename}**")
+
+            filename = st.selectbox(
+                "Select a document", filenames, index=default_index
+            )
+            st.session_state["last_filename"] = filename
 
             force_reindex = st.checkbox(
                 "Force re-index (skip the unchanged-content check)",
@@ -308,6 +359,7 @@ def render_documents_view() -> None:
                         if response.ok:
                             st.success("Document indexed successfully.")
                             st.json(response.json())
+                            st.rerun()
                         else:
                             st.error(response.text)
 
@@ -536,6 +588,122 @@ def render_analysis_view() -> None:
 
 
 # --------------------------------------------------------------------------
+# Analytics view
+# --------------------------------------------------------------------------
+
+
+def render_analytics_view() -> None:
+    st.title("📈 Analytics")
+    st.caption(
+        "Live numbers behind the MVP Success Criteria, computed from the "
+        "query audit log and analysis-run timings."
+    )
+
+    try:
+        response = requests.get(f"{API_BASE_URL}/api/analytics/kpis", timeout=30)
+    except requests.RequestException as exc:
+        st.error(f"Backend connection error: {exc}")
+        return
+
+    if not response.ok:
+        st.error(response.text)
+        return
+
+    kpis = response.json()
+    targets = kpis.get("targets", {})
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        with st.container(border=True):
+            st.metric(
+                "Avg response time",
+                f"{kpis['avg_response_time_ms'] / 1000:.2f} s",
+                help=f"Target: < {targets.get('response_time_ms', 5000) / 1000:.0f} s",
+            )
+            st.caption(f"{kpis['total_queries']} total queries logged")
+
+    with col2:
+        with st.container(border=True):
+            st.metric(
+                "Citation coverage",
+                f"{kpis['citation_coverage_pct']}%",
+                help=f"Target: {targets.get('citation_coverage_pct', 100)}%",
+            )
+            st.caption("Domain queries answered with at least one citation")
+
+    with col3:
+        with st.container(border=True):
+            st.metric(
+                "Grounded answer rate",
+                f"{kpis['grounded_rate_pct']}%",
+                help="Answers passing the groundedness heuristic",
+            )
+            st.caption("See rag_service._is_grounded")
+
+    col4, col5, col6 = st.columns(3)
+
+    with col4:
+        with st.container(border=True):
+            st.metric(
+                "Avg summary time",
+                f"{kpis['avg_summary_time_ms'] / 1000:.2f} s",
+                help=f"Target: < {targets.get('summary_time_ms', 15000) / 1000:.0f} s",
+            )
+
+    with col5:
+        with st.container(border=True):
+            st.metric(
+                "Avg obligation extraction time",
+                f"{kpis['avg_obligation_time_ms'] / 1000:.2f} s",
+            )
+
+    with col6:
+        with st.container(border=True):
+            st.metric(
+                "Indexed documents",
+                f"{kpis['indexed_documents']} / {kpis['total_documents']}",
+            )
+
+    with st.container(border=True):
+        st.subheader("Recent queries")
+
+        try:
+            log_response = requests.get(
+                f"{API_BASE_URL}/api/analytics/queries",
+                params={"limit": 25},
+                timeout=30,
+            )
+
+            if log_response.ok:
+                rows = log_response.json().get("queries", [])
+
+                if rows:
+                    st.dataframe(
+                        [
+                            {
+                                "Time": row["timestamp"][:19].replace("T", " "),
+                                "Question": row["question"],
+                                "Intent": row["intent"],
+                                "Grounded": bool(row["grounded"]),
+                                "Citations": row["citation_count"],
+                                "Response (ms)": row["response_time_ms"],
+                            }
+                            for row in rows
+                        ],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.info("No queries logged yet.")
+            else:
+                st.error(log_response.text)
+
+        except requests.RequestException as exc:
+            st.error(f"Backend connection error: {exc}")
+
+
+# --------------------------------------------------------------------------
 # Router
 # --------------------------------------------------------------------------
 
@@ -543,5 +711,7 @@ if st.session_state["view"] == "documents":
     render_documents_view()
 elif st.session_state["view"] == "analysis":
     render_analysis_view()
+elif st.session_state["view"] == "analytics":
+    render_analytics_view()
 else:
     render_chat_view()

@@ -44,5 +44,10 @@ DOMAIN_LABEL = os.getenv(
 # exchange) each chat session keeps server-side.
 MAX_SESSION_TURNS = int(os.getenv("MAX_SESSION_TURNS", "10"))
 
+# Document registry, query audit log, and analysis-run timing (KPIs) live
+# in a small local SQLite database.
+DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "data" / "app.db")))
+
 DOCUMENT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 CHROMA_PERSIST_DIRECTORY.mkdir(parents=True, exist_ok=True)
+DB_PATH.parent.mkdir(parents=True, exist_ok=True)

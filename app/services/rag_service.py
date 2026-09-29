@@ -1,9 +1,15 @@
+import logging
+import time
+
 from app.config import DOMAIN_LABEL, TOP_K
+from app.db import log_query
 from app.llm.client import chat_completion
 from app.rag.embeddings import embed_query
 from app.rag.vector_store import search
 from app.services import session_store
 from app.services.intent_router import classify_intent
+
+logger = logging.getLogger("compliance_copilot.chat")
 
 # Used verbatim so callers (and tests) can reliably detect an abstention
 # instead of parsing free text for something that "sounds like" a refusal.
@@ -45,6 +51,14 @@ The user's message is small talk (a greeting, thanks, goodbye, or a
 Reply briefly and warmly, and mention in one sentence that you can
 answer questions about {DOMAIN_LABEL}. Do not attempt to answer any
 substantive compliance question here, even if one is implied.
+"""
+
+SESSION_PROMPT = """
+You answer questions using ONLY the current chat session context supplied below.
+Do not use outside knowledge and do not perform regulatory document retrieval.
+If the requested information is not present in the session context, say exactly:
+"I don't have that information in this chat session."
+Keep the answer brief.
 """
 
 CONDENSE_PROMPT = """
@@ -112,17 +126,87 @@ def _remember(session_id: str | None, question: str, answer: str) -> None:
         session_store.remember_turn(session_id, question, answer)
 
 
+def _session_answer(question: str, history: list[dict], session_id: str | None) -> str:
+    facts = session_store.get_facts(session_id) if session_id else {}
+    name = facts.get("name")
+
+    # Deterministic handling for the most important explicit session fact.
+    normalized = question.strip().lower().rstrip("?!.")
+    if normalized in {"what is my name", "whats my name", "do you know my name", "who am i"}:
+        return f"Your name is {name}." if name else "I don't have your name in this chat session."
+
+    transcript = "\n".join(
+        f"{turn.get('role', 'user')}: {turn.get('content', '')}"
+        for turn in history[-10:]
+    )
+    facts_text = "\n".join(f"{k}: {v}" for k, v in facts.items()) or "(none)"
+    return chat_completion(
+        SESSION_PROMPT,
+        f"Session facts:\n{facts_text}\n\nConversation:\n{transcript}\n\nUser question:\n{question}",
+    ).strip()
+
+
+def _finish(result: dict, start: float, session_id: str | None) -> dict:
+    """Stamp response_time_ms onto the result, write it to the query
+    audit log, and print a live line to the terminal -- this is what
+    backs the live "Response Time" and "Citation Coverage" KPIs from the
+    doc's MVP Success Criteria, and lets you watch questions/citations
+    go by in real time while the backend is running."""
+    response_time_ms = int((time.perf_counter() - start) * 1000)
+    result["response_time_ms"] = response_time_ms
+
+    log_query(
+        session_id=session_id,
+        question=result["question"],
+        answer=result["answer"],
+        intent=result.get("intent"),
+        grounded=result.get("grounded", True),
+        citation_count=len(result.get("citations") or []),
+        response_time_ms=response_time_ms,
+    )
+
+    citations = result.get("citations") or []
+    citation_summary = (
+        "; ".join(
+            f"{c['document']} p.{c['page']} chunk={c['chunk_id']}"
+            for c in citations
+        )
+        if citations
+        else "none"
+    )
+
+    logger.info(
+        "QUESTION=%r | intent=%s | grounded=%s | time_ms=%d | "
+        "citations=[%s] | ANSWER=%r",
+        result["question"],
+        result.get("intent"),
+        result.get("grounded"),
+        response_time_ms,
+        citation_summary,
+        (result["answer"][:200] + "…")
+        if len(result["answer"]) > 200
+        else result["answer"],
+    )
+
+    return result
+
+
 def answer_question(
     question: str,
     top_k: int = TOP_K,
     history: list[dict] | None = None,
     session_id: str | None = None,
 ) -> dict:
+    start = time.perf_counter()
+
     # A session_id lets the server own "recent conversation" instead of
     # requiring the caller to resend the whole transcript every request.
     # An explicitly-passed history always wins (stateless API callers).
     if history is None and session_id:
         history = session_store.get_history(session_id)
+
+    if session_id:
+        session_store.remember_explicit_facts(session_id, question)
 
     intent = classify_intent(question, history)
 
@@ -130,28 +214,55 @@ def answer_question(
         answer = chat_completion(GREETING_PROMPT, question)
         _remember(session_id, question, answer)
 
-        return {
-            "question": question,
-            "search_query": question,
-            "intent": intent,
-            "answer": answer,
-            "citations": [],
-            "retrieved_chunks": 0,
-            "grounded": True,
-        }
+        return _finish(
+            {
+                "question": question,
+                "search_query": question,
+                "intent": intent,
+                "answer": answer,
+                "citations": [],
+                "retrieved_chunks": 0,
+                "grounded": True,
+            },
+            start,
+            session_id,
+        )
+
+    if intent == "session_query":
+        current_history = history or (session_store.get_history(session_id) if session_id else [])
+        answer = _session_answer(question, current_history, session_id)
+        _remember(session_id, question, answer)
+
+        return _finish(
+            {
+                "question": question,
+                "search_query": question,
+                "intent": intent,
+                "answer": answer,
+                "citations": [],
+                "retrieved_chunks": 0,
+                "grounded": True,
+            },
+            start,
+            session_id,
+        )
 
     if intent == "out_of_scope":
         _remember(session_id, question, OUT_OF_SCOPE_MESSAGE)
 
-        return {
-            "question": question,
-            "search_query": question,
-            "intent": intent,
-            "answer": OUT_OF_SCOPE_MESSAGE,
-            "citations": [],
-            "retrieved_chunks": 0,
-            "grounded": True,
-        }
+        return _finish(
+            {
+                "question": question,
+                "search_query": question,
+                "intent": intent,
+                "answer": OUT_OF_SCOPE_MESSAGE,
+                "citations": [],
+                "retrieved_chunks": 0,
+                "grounded": True,
+            },
+            start,
+            session_id,
+        )
 
     # intent == "domain_query" -- standard retrieval + generation path.
     search_query = _condense_question(question, history)
@@ -161,15 +272,19 @@ def answer_question(
     if not results:
         _remember(session_id, question, FALLBACK_MESSAGE)
 
-        return {
-            "question": question,
-            "search_query": search_query,
-            "intent": intent,
-            "answer": FALLBACK_MESSAGE,
-            "citations": [],
-            "retrieved_chunks": 0,
-            "grounded": True,
-        }
+        return _finish(
+            {
+                "question": question,
+                "search_query": search_query,
+                "intent": intent,
+                "answer": FALLBACK_MESSAGE,
+                "citations": [],
+                "retrieved_chunks": 0,
+                "grounded": True,
+            },
+            start,
+            session_id,
+        )
 
     context_parts = []
     citations = []
@@ -206,12 +321,16 @@ def answer_question(
 
     _remember(session_id, question, answer)
 
-    return {
-        "question": question,
-        "search_query": search_query,
-        "intent": intent,
-        "answer": answer,
-        "citations": citations,
-        "retrieved_chunks": len(results),
-        "grounded": _is_grounded(answer, context_parts),
-    }
+    return _finish(
+        {
+            "question": question,
+            "search_query": search_query,
+            "intent": intent,
+            "answer": answer,
+            "citations": citations,
+            "retrieved_chunks": len(results),
+            "grounded": _is_grounded(answer, context_parts),
+        },
+        start,
+        session_id,
+    )

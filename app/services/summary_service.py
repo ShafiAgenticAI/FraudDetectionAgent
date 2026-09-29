@@ -1,12 +1,18 @@
+import logging
+import time
 from pathlib import Path
 
 from app.config import DOCUMENT_DIRECTORY
+from app.db import log_analysis_run
 from app.llm.client import chat_completion
 from app.parsers.pdf_parser import extract_pages
 from app.rag.chunker import build_chunks
 
+logger = logging.getLogger("compliance_copilot.analysis")
+
 
 def summarize_document(filename: str) -> dict:
+    start = time.perf_counter()
     path = DOCUMENT_DIRECTORY / Path(filename).name
 
     if not path.exists():
@@ -55,13 +61,25 @@ def summarize_document(filename: str) -> dict:
             "2. Key Obligations\n"
             "3. Key Changes\n"
             "4. Key Risks\n"
-            "5. Business Impact\n\n"
+            "5. Business Impact\n"
+            "6. Recommended Actions\n\n"
+            "\"Recommended Actions\" must be concrete, actionable next "
+            "steps a compliance officer should take in response to this "
+            "regulation -- not a restatement of the obligations. "
             "Do not invent facts."
         ),
         combined,
     )
 
+    response_time_ms = int((time.perf_counter() - start) * 1000)
+    log_analysis_run(path.name, "summary", response_time_ms)
+
+    logger.info(
+        "SUMMARY complete | file=%s | time_ms=%d", path.name, response_time_ms
+    )
+
     return {
         "filename": path.name,
         "summary": final_summary,
+        "response_time_ms": response_time_ms,
     }

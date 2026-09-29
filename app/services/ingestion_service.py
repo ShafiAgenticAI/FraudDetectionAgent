@@ -1,13 +1,17 @@
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import DOCUMENT_DIRECTORY
+from app.db import record_indexed, remove_document_record
 from app.parsers.pdf_parser import extract_pages, pdf_stats
 from app.rag.chunker import build_chunks
 from app.rag.embeddings import embed_texts
 from app.rag.vector_store import add_chunks, delete_document
+
+logger = logging.getLogger("compliance_copilot.ingestion")
 
 # Tracks the content hash of the last-indexed version of each document, so
 # re-ingesting an unchanged file is a cheap no-op instead of a full re-embed
@@ -48,6 +52,7 @@ def ingest_pdf(filename: str, force: bool = False) -> dict:
 
     if not force and manifest.get(safe_name) == current_hash:
         stats = pdf_stats(pdf_path)
+        logger.info("INGEST skipped (unchanged) | file=%s", safe_name)
         return {
             **stats,
             "chunks_created": 0,
@@ -93,6 +98,15 @@ def ingest_pdf(filename: str, force: bool = False) -> dict:
 
     stats = pdf_stats(pdf_path)
 
+    record_indexed(safe_name, len(chunks))
+
+    logger.info(
+        "INGEST complete | file=%s | pages=%d | chunks=%d",
+        safe_name,
+        stats.get("total_pages"),
+        len(chunks),
+    )
+
     return {
         **stats,
         "chunks_created": len(chunks),
@@ -115,6 +129,14 @@ def remove_document(filename: str) -> dict:
     manifest = _load_manifest()
     manifest.pop(safe_name, None)
     _save_manifest(manifest)
+
+    remove_document_record(safe_name)
+
+    logger.info(
+        "DELETE complete | file=%s | chunks_removed=%d",
+        safe_name,
+        removed_chunks,
+    )
 
     return {
         "filename": safe_name,
