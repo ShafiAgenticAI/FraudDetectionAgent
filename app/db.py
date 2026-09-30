@@ -252,3 +252,44 @@ def get_kpis() -> dict:
                 "citation_coverage_pct": 100,
             },
         }
+
+
+def record_ragas_evaluation(run_timestamp: str, golden_questions: int, metrics: dict, citation_page_hit_rate: float) -> None:
+    with _connect() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ragas_evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_timestamp TEXT NOT NULL,
+                golden_questions INTEGER NOT NULL,
+                metrics_json TEXT NOT NULL,
+                citation_page_hit_rate REAL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        import json
+        conn.execute(
+            "INSERT INTO ragas_evaluations (run_timestamp, golden_questions, metrics_json, citation_page_hit_rate, created_at) VALUES (?, ?, ?, ?, ?)",
+            (run_timestamp, golden_questions, json.dumps(metrics), citation_page_hit_rate, _now()),
+        )
+
+
+def recent_ragas_evaluations(limit: int = 10) -> list[dict]:
+    with _connect() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ragas_evaluations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_timestamp TEXT NOT NULL,
+                golden_questions INTEGER NOT NULL,
+                metrics_json TEXT NOT NULL,
+                citation_page_hit_rate REAL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        rows = conn.execute("SELECT * FROM ragas_evaluations ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        import json
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["metrics"] = json.loads(item.pop("metrics_json"))
+            result.append(item)
+        return result

@@ -53,14 +53,6 @@ answer questions about {DOMAIN_LABEL}. Do not attempt to answer any
 substantive compliance question here, even if one is implied.
 """
 
-SESSION_PROMPT = """
-You answer questions using ONLY the current chat session context supplied below.
-Do not use outside knowledge and do not perform regulatory document retrieval.
-If the requested information is not present in the session context, say exactly:
-"I don't have that information in this chat session."
-Keep the answer brief.
-"""
-
 CONDENSE_PROMPT = """
 You rewrite a user's latest chat message into a standalone search query,
 using the prior conversation as context.
@@ -126,26 +118,6 @@ def _remember(session_id: str | None, question: str, answer: str) -> None:
         session_store.remember_turn(session_id, question, answer)
 
 
-def _session_answer(question: str, history: list[dict], session_id: str | None) -> str:
-    facts = session_store.get_facts(session_id) if session_id else {}
-    name = facts.get("name")
-
-    # Deterministic handling for the most important explicit session fact.
-    normalized = question.strip().lower().rstrip("?!.")
-    if normalized in {"what is my name", "whats my name", "do you know my name", "who am i"}:
-        return f"Your name is {name}." if name else "I don't have your name in this chat session."
-
-    transcript = "\n".join(
-        f"{turn.get('role', 'user')}: {turn.get('content', '')}"
-        for turn in history[-10:]
-    )
-    facts_text = "\n".join(f"{k}: {v}" for k, v in facts.items()) or "(none)"
-    return chat_completion(
-        SESSION_PROMPT,
-        f"Session facts:\n{facts_text}\n\nConversation:\n{transcript}\n\nUser question:\n{question}",
-    ).strip()
-
-
 def _finish(result: dict, start: float, session_id: str | None) -> dict:
     """Stamp response_time_ms onto the result, write it to the query
     audit log, and print a live line to the terminal -- this is what
@@ -205,10 +177,8 @@ def answer_question(
     if history is None and session_id:
         history = session_store.get_history(session_id)
 
-    if session_id:
-        session_store.remember_explicit_facts(session_id, question)
-
-    intent = classify_intent(question, history)
+    facts = session_store.get_facts(session_id) if session_id else {}
+    intent = classify_intent(question, history, facts)
 
     if intent == "greeting":
         answer = chat_completion(GREETING_PROMPT, question)
@@ -229,23 +199,22 @@ def answer_question(
         )
 
     if intent == "session_query":
-        current_history = history or (session_store.get_history(session_id) if session_id else [])
-        answer = _session_answer(question, current_history, session_id)
+        name = facts.get("name")
+        q = question.lower().strip()
+        if name and any(phrase in q for phrase in ["what is my name", "what's my name", "do you know my name", "remember my name"]):
+            answer = f"Your name is {name}."
+        elif history:
+            answer = chat_completion(
+                "Answer only from the supplied current-session conversation and facts. If the information is not present, say you do not know it.",
+                f"Session facts:\n{facts}\n\nConversation:\n{history[-10:]}\n\nQuestion:\n{question}",
+            )
+        else:
+            answer = "I don't have that information in this session."
         _remember(session_id, question, answer)
-
-        return _finish(
-            {
-                "question": question,
-                "search_query": question,
-                "intent": intent,
-                "answer": answer,
-                "citations": [],
-                "retrieved_chunks": 0,
-                "grounded": True,
-            },
-            start,
-            session_id,
-        )
+        return _finish({
+            "question": question, "search_query": question, "intent": intent,
+            "answer": answer, "citations": [], "retrieved_chunks": 0, "grounded": True,
+        }, start, session_id)
 
     if intent == "out_of_scope":
         _remember(session_id, question, OUT_OF_SCOPE_MESSAGE)

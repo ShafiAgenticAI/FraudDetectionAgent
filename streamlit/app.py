@@ -665,6 +665,41 @@ def render_analytics_view() -> None:
                 f"{kpis['indexed_documents']} / {kpis['total_documents']}",
             )
 
+    st.divider()
+    with st.container(border=True):
+        st.subheader("🧪 Ragas RAG Evaluation")
+        st.caption("Offline evaluation of the 40-question golden set. It does not run during normal chat.")
+        if st.button("▶️ Run Ragas Evaluation", key="run_ragas_eval"):
+            with st.spinner("Running golden-set evaluation with Ragas. This may take several minutes..."):
+                try:
+                    rr = requests.post(f"{API_BASE_URL}/api/analytics/ragas/run", timeout=1900)
+                    if rr.ok:
+                        data = rr.json()
+                        st.success(f"Evaluation complete — {data.get('golden_questions', 0)} golden questions evaluated.")
+                        metrics = data.get("metrics", {})
+                        cols = st.columns(max(1, min(5, len(metrics) + 1)))
+                        for idx, (name, value) in enumerate(metrics.items()):
+                            cols[idx % len(cols)].metric(name.replace("_", " ").title(), f"{float(value):.3f}")
+                        st.metric("Citation page hit rate", f"{float(data.get('citation_page_hit_rate', 0))*100:.1f}%")
+                    else:
+                        st.error(rr.text)
+                except requests.RequestException as exc:
+                    st.error(f"Backend connection error: {exc}")
+
+        try:
+            rh = requests.get(f"{API_BASE_URL}/api/analytics/ragas", params={"limit": 10}, timeout=30)
+            if rh.ok:
+                evaluations = rh.json().get("evaluations", [])
+                if evaluations:
+                    st.dataframe(
+                        [{"Run": e["run_timestamp"], "Questions": e["golden_questions"], **{k: round(float(v), 3) for k, v in e["metrics"].items()}, "Citation page hit rate": round(float(e["citation_page_hit_rate"]), 3)} for e in evaluations],
+                        use_container_width=True, hide_index=True
+                    )
+                else:
+                    st.info("No Ragas evaluation runs yet.")
+        except requests.RequestException:
+            pass
+
     with st.container(border=True):
         st.subheader("Recent queries")
 

@@ -14,8 +14,9 @@ CHROMA_PERSIST_DIRECTORY = Path(
     os.getenv("CHROMA_PERSIST_DIRECTORY", str(BASE_DIR / "data" / "chroma"))
 )
 
-# Which LLM provider to use for chat + embeddings: "openai" or "gemini".
-LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+# Which LLM provider to use for chat + embeddings: "openai", "gemini",
+# or "bedrock".
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
@@ -24,9 +25,30 @@ OPENAI_EMBEDDING_MODEL = os.getenv(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-1.5-flash")
+GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
 GEMINI_EMBEDDING_MODEL = os.getenv(
-    "GEMINI_EMBEDDING_MODEL", "models/text-embedding-004"
+    "GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"
+)
+
+# AWS Bedrock -- only needed when LLM_PROVIDER=bedrock. Credentials are
+# read from these vars if set; otherwise boto3's normal default chain
+# applies (these are boto3's standard env var names, so if you already
+# export them, or load them via .env, boto3 picks them up automatically).
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
+AWS_SESSION_TOKEN = os.getenv("AWS_SESSION_TOKEN", "")  # only for temporary creds
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+# Model IDs must be enabled for your account under Bedrock console ->
+# Model access before first use, even on a free-tier/credit account.
+# Titan models are usually enabled by default; Anthropic/Meta/Cohere
+# models typically require a one-time access request (instant approval
+# for most).
+BEDROCK_CHAT_MODEL = os.getenv(
+    "BEDROCK_CHAT_MODEL", "anthropic.claude-3-5-haiku-20241022-v1:0"
+)
+BEDROCK_EMBEDDING_MODEL = os.getenv(
+    "BEDROCK_EMBEDDING_MODEL", "amazon.titan-embed-text-v2:0"
 )
 
 TOP_K = int(os.getenv("TOP_K", "5"))
@@ -51,3 +73,6 @@ DB_PATH = Path(os.getenv("DB_PATH", str(BASE_DIR / "data" / "app.db")))
 DOCUMENT_DIRECTORY.mkdir(parents=True, exist_ok=True)
 CHROMA_PERSIST_DIRECTORY.mkdir(parents=True, exist_ok=True)
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+RAGAS_GEMINI_MODEL = os.getenv("RAGAS_GEMINI_MODEL", GEMINI_CHAT_MODEL)
+RAGAS_MIN_SCORE = float(os.getenv("RAGAS_MIN_SCORE", "0.70"))

@@ -11,7 +11,15 @@ This keeps provider-specific code in exactly one place.
 
 from __future__ import annotations
 
+import json
+
 from app.config import (
+    AWS_ACCESS_KEY_ID,
+    AWS_REGION,
+    AWS_SECRET_ACCESS_KEY,
+    AWS_SESSION_TOKEN,
+    BEDROCK_CHAT_MODEL,
+    BEDROCK_EMBEDDING_MODEL,
     GEMINI_API_KEY,
     GEMINI_CHAT_MODEL,
     GEMINI_EMBEDDING_MODEL,
@@ -23,6 +31,7 @@ from app.config import (
 
 _openai_client = None
 _gemini_configured = False
+_bedrock_client = None
 
 
 # --------------------------------------------------------------------------
@@ -65,6 +74,45 @@ def _configure_gemini():
     return genai
 
 
+def _get_bedrock_client():
+    global _bedrock_client
+
+    if _bedrock_client is None:
+        import boto3
+
+        kwargs = {"region_name": AWS_REGION}
+
+        # If explicit creds are set, pass them; otherwise let boto3 fall
+        # back to its normal default chain (env vars already named
+        # AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN are
+        # picked up automatically, as are ~/.aws/credentials or an IAM
+        # role, so explicit passing here is just belt-and-suspenders for
+        # the .env-driven config this app otherwise uses).
+        if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY:
+            kwargs["aws_access_key_id"] = AWS_ACCESS_KEY_ID
+            kwargs["aws_secret_access_key"] = AWS_SECRET_ACCESS_KEY
+            if AWS_SESSION_TOKEN:
+                kwargs["aws_session_token"] = AWS_SESSION_TOKEN
+
+        _bedrock_client = boto3.client("bedrock-runtime", **kwargs)
+
+    return _bedrock_client
+
+
+def _strip_json_fences(text: str) -> str:
+    """Some Bedrock models wrap JSON in ```json ... ``` even when asked
+    not to; strip that so json.loads() in the caller doesn't choke."""
+    text = text.strip()
+
+    if text.startswith("```"):
+        lines = text.split("\n")[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    return text
+
+
 # --------------------------------------------------------------------------
 # Chat completion
 # --------------------------------------------------------------------------
@@ -85,6 +133,9 @@ def chat_completion(
 
     if LLM_PROVIDER == "gemini":
         return _gemini_chat(system_prompt, user_prompt, temperature, json_mode)
+
+    if LLM_PROVIDER == "bedrock":
+        return _bedrock_chat(system_prompt, user_prompt, temperature, json_mode)
 
     return _openai_chat(system_prompt, user_prompt, temperature, json_mode)
 
@@ -139,6 +190,46 @@ def _gemini_chat(
     return response.text
 
 
+def _bedrock_chat(
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    json_mode: bool,
+) -> str:
+    client = _get_bedrock_client()
+
+    prompt = user_prompt
+
+    if json_mode:
+        prompt += (
+            "\n\nRespond with ONLY a valid JSON object and nothing else "
+            "-- no markdown code fences, no commentary before or after it."
+        )
+
+    try:
+        response = client.converse(
+            modelId=BEDROCK_CHAT_MODEL,
+            system=[{"text": system_prompt}],
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"temperature": temperature},
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Bedrock chat call failed for model '{BEDROCK_CHAT_MODEL}' in "
+            f"region '{AWS_REGION}': {exc}. If this is an AccessDenied or "
+            "ValidationException, enable model access for this model under "
+            "Bedrock console -> Model access, and confirm your "
+            "AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_REGION are correct."
+        ) from exc
+
+    text = response["output"]["message"]["content"][0]["text"]
+
+    if json_mode:
+        text = _strip_json_fences(text)
+
+    return text
+
+
 # --------------------------------------------------------------------------
 # Embeddings
 # --------------------------------------------------------------------------
@@ -153,6 +244,9 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if LLM_PROVIDER == "gemini":
         return _gemini_embed(texts, task_type="retrieval_document")
 
+    if LLM_PROVIDER == "bedrock":
+        return _bedrock_embed(texts)
+
     return _openai_embed(texts)
 
 
@@ -161,6 +255,9 @@ def embed_query(text: str) -> list[float]:
 
     if LLM_PROVIDER == "gemini":
         return _gemini_embed([text], task_type="retrieval_query")[0]
+
+    if LLM_PROVIDER == "bedrock":
+        return _bedrock_embed([text])[0]
 
     return _openai_embed([text])[0]
 
@@ -188,5 +285,33 @@ def _gemini_embed(texts: list[str], task_type: str) -> list[list[float]]:
             task_type=task_type,
         )
         embeddings.append(result["embedding"])
+
+    return embeddings
+
+
+def _bedrock_embed(texts: list[str]) -> list[list[float]]:
+    client = _get_bedrock_client()
+    embeddings = []
+
+    for text in texts:
+        body = json.dumps({"inputText": text})
+
+        try:
+            response = client.invoke_model(
+                modelId=BEDROCK_EMBEDDING_MODEL,
+                body=body,
+                contentType="application/json",
+                accept="application/json",
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Bedrock embedding call failed for model "
+                f"'{BEDROCK_EMBEDDING_MODEL}' in region '{AWS_REGION}': "
+                f"{exc}. Confirm model access is enabled and your AWS "
+                "credentials/region are correct."
+            ) from exc
+
+        payload = json.loads(response["body"].read())
+        embeddings.append(payload["embedding"])
 
     return embeddings
